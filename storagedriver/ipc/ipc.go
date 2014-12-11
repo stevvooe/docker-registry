@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"io"
 	"reflect"
+	"time"
 
+	"github.com/Sirupsen/logrus"
 	"github.com/docker/docker-registry/storagedriver"
 	"github.com/docker/libchan"
 )
@@ -73,6 +75,12 @@ func WrapError(err error) *ResponseError {
 // Unwrap returns the underlying error if it can be reconstructed, or the
 // original ResponseError otherwise.
 func (err *ResponseError) Unwrap() error {
+	logrus.Infof("Unwrap %v", err)
+	if err == nil {
+		logrus.Infof("Unwrap return %v", err)
+		return nil
+	}
+
 	var errVal reflect.Value
 	var zeroVal reflect.Value
 
@@ -83,21 +91,25 @@ func (err *ResponseError) Unwrap() error {
 		errVal = reflect.ValueOf(&storagedriver.InvalidOffsetError{})
 	}
 	if errVal == zeroVal {
+		logrus.Infof("Unwrap return %v", err)
 		return err
 	}
 
 	for k, v := range err.Parameters {
 		fieldVal := errVal.Elem().FieldByName(k)
 		if fieldVal == zeroVal {
+			logrus.Infof("Unwrap return %v", err)
 			return err
 		}
 		fieldVal.Set(reflect.ValueOf(v))
 	}
 
 	if unwrapped, ok := errVal.Elem().Interface().(error); ok {
+		logrus.Infof("Unwrap return %v", err)
 		return unwrapped
 	}
 
+	logrus.Infof("Unwrap return %v", err)
 	return err
 
 }
@@ -122,13 +134,22 @@ type ReadStreamResponse struct {
 
 // WriteStreamResponse is a response for a WriteStream request
 type WriteStreamResponse struct {
-	Error *ResponseError `codec:",omitempty"`
+	Written int64
+	Error   *ResponseError `codec:",omitempty"`
 }
 
-// CurrentSizeResponse is a response for a CurrentSize request
-type CurrentSizeResponse struct {
-	Position uint64         `codec:",omitempty"`
-	Error    *ResponseError `codec:",omitempty"`
+// StatResponse is a response for a Stat request
+type StatResponse struct {
+	// BUG(stevvooe): Unfortunately, libchan doesn't support embedded structs,
+	// so these fields need to be reproduced.
+	// storagedriver.FileInfoFields
+
+	Path    string
+	Size    int64
+	ModTime time.Time
+	IsDir   bool
+
+	Error *ResponseError `codec:",omitempty"`
 }
 
 // ListResponse is a response for a List request

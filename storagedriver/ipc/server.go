@@ -10,6 +10,7 @@ import (
 	"os"
 	"reflect"
 
+	"github.com/Sirupsen/logrus"
 	"github.com/docker/docker-registry/storagedriver"
 	"github.com/docker/libchan"
 	"github.com/docker/libchan/spdy"
@@ -118,24 +119,38 @@ func handleRequest(driver storagedriver.StorageDriver, request Request) {
 		path, _ := request.Parameters["Path"].(string)
 		// Depending on serialization method, Offset may be convereted to any int/uint type
 		offset := reflect.ValueOf(request.Parameters["Offset"]).Convert(reflect.TypeOf(int64(0))).Int()
-		// Depending on serialization method, Size may be convereted to any int/uint type
-		size := reflect.ValueOf(request.Parameters["Size"]).Convert(reflect.TypeOf(int64(0))).Int()
+
+		// Even though we specify an io.Reader, we actually transit an
+		// io.ReadCloser to get around bugs in libchan.
 		reader, _ := request.Parameters["Reader"].(io.ReadCloser)
-		err := driver.WriteStream(path, offset, size, reader)
+		defer reader.Close()
+
+		nn, err := driver.WriteStream(path, offset, reader)
 		response := WriteStreamResponse{
-			Error: WrapError(err),
+			Written: nn,
+			Error:   WrapError(err),
 		}
 		err = request.ResponseChannel.Send(&response)
 		if err != nil {
 			panic(err)
 		}
-	case "CurrentSize":
+		logrus.Infof("response sent: %#v %#v", response, response.Error)
+	case "Stat":
 		path, _ := request.Parameters["Path"].(string)
-		position, err := driver.CurrentSize(path)
-		response := CurrentSizeResponse{
-			Position: position,
-			Error:    WrapError(err),
+
+		fi, err := driver.Stat(path)
+
+		var response StatResponse
+
+		if err == nil {
+			response.Path = fi.Path()
+			response.Size = fi.Size()
+			response.ModTime = fi.ModTime()
+			response.IsDir = fi.IsDir()
+		} else {
+			response.Error = WrapError(err)
 		}
+
 		err = request.ResponseChannel.Send(&response)
 		if err != nil {
 			panic(err)

@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"syscall"
 
+	"github.com/Sirupsen/logrus"
 	"github.com/docker/docker-registry/storagedriver"
 	"github.com/docker/libchan"
 	"github.com/docker/libchan/spdy"
@@ -263,56 +264,64 @@ func (driver *StorageDriverClient) ReadStream(path string, offset int64) (io.Rea
 
 // WriteStream stores the contents of the provided io.ReadCloser at a location
 // designated by the given path.
-func (driver *StorageDriverClient) WriteStream(path string, offset, size int64, reader io.ReadCloser) error {
+func (driver *StorageDriverClient) WriteStream(path string, offset int64, reader io.Reader) (nn int64, err error) {
 	if err := driver.exited(); err != nil {
-		return err
+		return 0, err
 	}
 
 	receiver, remoteSender := libchan.Pipe()
-	params := map[string]interface{}{"Path": path, "Offset": offset, "Size": size, "Reader": reader}
-	err := driver.sender.Send(&Request{Type: "WriteStream", Parameters: params, ResponseChannel: remoteSender})
-	if err != nil {
-		return err
+	params := map[string]interface{}{
+		"Path":   path,
+		"Offset": offset,
+
+		// BUG(stevvooe): Need to wrap in io.ReadCloser because libchan does
+		// not support plain readers.
+		"Reader": ioutil.NopCloser(reader),
+	}
+	if err := driver.sender.Send(&Request{Type: "WriteStream", Parameters: params, ResponseChannel: remoteSender}); err != nil {
+		return 0, err
 	}
 
 	response := new(WriteStreamResponse)
+	logrus.Infof("wait receive")
 	err = driver.receiveResponse(receiver, response)
 	if err != nil {
-		return err
+		return 0, err
 	}
 
-	if response.Error != nil {
-		return response.Error.Unwrap()
-	}
-
-	return nil
+	logrus.Infof("response received: %#v, %#v", response, response.Error)
+	return response.Written, response.Error.Unwrap()
 }
 
-// CurrentSize retrieves the curernt size in bytes of the object at the given
-// path.
-func (driver *StorageDriverClient) CurrentSize(path string) (uint64, error) {
+// Stat retrieves the FileInfo for the given path, including the current size
+// in bytes and the creation time.
+func (driver *StorageDriverClient) Stat(path string) (fi storagedriver.FileInfo, err error) {
 	if err := driver.exited(); err != nil {
-		return 0, err
+		return fi, err
 	}
 
 	receiver, remoteSender := libchan.Pipe()
 	params := map[string]interface{}{"Path": path}
-	err := driver.sender.Send(&Request{Type: "CurrentSize", Parameters: params, ResponseChannel: remoteSender})
-	if err != nil {
-		return 0, err
+	if err := driver.sender.Send(&Request{Type: "Stat", Parameters: params, ResponseChannel: remoteSender}); err != nil {
+		return nil, err
 	}
 
-	response := new(CurrentSizeResponse)
+	response := new(StatResponse)
 	err = driver.receiveResponse(receiver, response)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 
 	if response.Error != nil {
-		return 0, response.Error.Unwrap()
+		return nil, response.Error.Unwrap()
 	}
 
-	return response.Position, nil
+	return storagedriver.FileInfoInternal{FileInfoFields: storagedriver.FileInfoFields{
+		Path:    response.Path,
+		Size:    response.Size,
+		ModTime: response.ModTime,
+		IsDir:   response.IsDir,
+	}}, nil
 }
 
 // List returns a list of the objects that are direct descendants of the given
