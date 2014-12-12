@@ -28,6 +28,8 @@ type App struct {
 
 	// services contains the main services instance for the application.
 	services *storage.Services
+
+	accessController AccessController
 }
 
 // NewApp takes a configuration and returns a configured app, ready to serve
@@ -60,6 +62,14 @@ func NewApp(configuration configuration.Configuration) *App {
 
 	app.driver = driver
 	app.services = storage.NewServices(app.driver)
+
+	switch configuration.Auth.Type() {
+	case "silly":
+		app.accessController = sillyAccessController{
+			realm:   configuration.Auth.Parameters()["realm"],
+			service: configuration.Auth.Parameters()["service"],
+		}
+	}
 
 	return app
 }
@@ -111,15 +121,11 @@ func (ssrw *singleStatusResponseWriter) WriteHeader(status int) {
 // handler, using the dispatch factory function.
 func (app *App) dispatcher(dispatch dispatchFunc) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		vars := mux.Vars(r)
-		context := &Context{
-			App:        app,
-			Name:       vars["name"],
-			urlBuilder: v2.NewURLBuilderFromRequest(r),
-		}
+		context := app.context(r)
 
-		// Store vars for underlying handlers.
-		context.vars = vars
+		if err := app.authorized(w, r, context); err != nil {
+			return
+		}
 
 		context.log = log.WithField("name", context.Name)
 		handler := dispatch(context, r)
@@ -138,6 +144,62 @@ func (app *App) dispatcher(dispatch dispatchFunc) http.Handler {
 			serveJSON(w, context.Errors)
 		}
 	})
+}
+
+// context constructs the context object for the application. This only be
+// called once per request.
+func (app *App) context(r *http.Request) *Context {
+	vars := mux.Vars(r)
+	context := &Context{
+		App:        app,
+		Name:       vars["name"],
+		urlBuilder: newURLBuilderFromRequest(r),
+	}
+
+	// Store vars for underlying handlers.
+	context.vars = vars
+
+	return context
+}
+
+// authorized checks if the request can proceed with with request access-
+// level. If it cannot, the method will return an error.
+func (app *App) authorized(w http.ResponseWriter, r *http.Request, context *Context) error {
+	if app.accessController != nil {
+		var op Operation
+		switch r.Method {
+		case "GET", "HEAD":
+			op |= OperationPull
+		case "POST", "PUT":
+			op |= OperationPush
+		}
+
+		access := Access{
+			Repository: context.Name,
+			Operations: op,
+		}
+
+		if err := app.accessController.Authorized(r, access); err != nil {
+			switch err := err.(type) {
+			case Challenge:
+				w.Header().Set("WWW-Authenticate", err.Error())
+				w.WriteHeader(http.StatusUnauthorized)
+
+				// TODO(sday): Maybe we have a json response with an error code.
+			default:
+				// This condition is a potential security problem either in
+				// the configuration or whatever is backing the access
+				// controller. Just return a bad request with no information
+				// to avoid exposure. The request should not proceed.
+				context.log.Errorf("error checking authorization: %v", err)
+				w.WriteHeader(http.StatusBadRequest)
+			}
+
+			return err
+		}
+	}
+
+	return nil
 }
 
 // apiBase implements a simple yes-man for doing overall checks against the

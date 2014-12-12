@@ -3,3 +3,7 @@ loglevel: debug
 storage: inmemory
 http:
     addr: :5000
+auth:
+    silly:
+        realm: https://auth-stage.docker.com/v2/token/
+        service: registry-stage-v2

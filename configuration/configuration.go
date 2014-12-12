@@ -24,6 +24,8 @@ type Configuration struct {
 	// Storage is the configuration for the registry's storage driver
 	Storage Storage `yaml:"storage"`
 
+	Auth Auth `yaml:"auth"`
+
 	// HTTP contains configuration parameters for the registry's http
 	// interface.
 	HTTP struct {
@@ -120,49 +122,55 @@ func (loglevel *Loglevel) UnmarshalYAML(unmarshal func(interface{}) error) error
 	return nil
 }
 
-// Storage defines the configuration for registry object storage
-type Storage map[string]Parameters
+// typedParemeters a type that exposes the key along with child values in a
+// yaml file.
+type typedParameters map[string]Parameters
 
-// Type returns the storage driver type, such as filesystem or s3
-func (storage Storage) Type() string {
+// Type returns the parameters type, such as filesystem or s3, or basic or
+// bearer for auth.
+func (tp typedParameters) Type() string {
 	// Return only key in this map
-	for k := range storage {
+	for k := range tp {
 		return k
 	}
 	return ""
 }
 
-// Parameters returns the Parameters map for a Storage configuration
-func (storage Storage) Parameters() Parameters {
-	return storage[storage.Type()]
+// Parameters returns the Parameters map for a parameterized configuration
+func (tp typedParameters) Parameters() Parameters {
+	return tp[tp.Type()]
 }
 
-// setParameter changes the parameter at the provided key to the new value
-func (storage Storage) setParameter(key, value string) {
-	storage[storage.Type()][key] = value
+// setParameter changes the parameter at the provided key to the new value.
+func (tp typedParameters) setParameter(key, value string) {
+	tp[tp.Type()][key] = value
 }
 
-// UnmarshalYAML implements the yaml.Unmarshaler interface
-// Unmarshals a single item map into a Storage or a string into a Storage type with no parameters
-func (storage *Storage) UnmarshalYAML(unmarshal func(interface{}) error) error {
-	var storageMap map[string]Parameters
-	err := unmarshal(&storageMap)
+// UnmarshalYAML implements the yaml.Unmarshaler interface. Unmarshals a
+// single item map into a typedParemeter or a string into a type with no
+// parameters
+func (tp *typedParameters) UnmarshalYAML(unmarshal func(interface{}) error) error {
+	var m map[string]Parameters
+	err := unmarshal(&m)
 	if err == nil {
-		if len(storageMap) > 1 {
-			types := make([]string, 0, len(storageMap))
-			for k := range storageMap {
+		if len(m) > 1 {
+			types := make([]string, 0, len(m))
+			for k := range m {
 				types = append(types, k)
 			}
-			return fmt.Errorf("Must provide exactly one storage type. Provided: %v", types)
+
+			// TODO(stevvooe): May want to change this slightly for
+			// authorization to allow multiple challenges.
+			return fmt.Errorf("must provide exactly one type. Provided: %v", types)
 		}
-		*storage = storageMap
+		*tp = m
 		return nil
 	}
 
-	var storageType string
-	err = unmarshal(&storageType)
+	var typ string
+	err = unmarshal(&typ)
 	if err == nil {
-		*storage = Storage{storageType: Parameters{}}
+		*tp = typedParameters{typ: Parameters{}}
 		return nil
 	}
 
@@ -170,11 +178,22 @@ func (storage *Storage) UnmarshalYAML(unmarshal func(interface{}) error) error {
 }
 
 // MarshalYAML implements the yaml.Marshaler interface
-func (storage Storage) MarshalYAML() (interface{}, error) {
-	if storage.Parameters() == nil {
-		return storage.Type, nil
+func (tp typedParameters) MarshalYAML() (interface{}, error) {
+	if tp.Parameters() == nil {
+		return tp.Type(), nil
 	}
-	return map[string]Parameters(storage), nil
+	return map[string]Parameters(tp), nil
+}
+
+// Storage defines the configuration for registry object storage
+type Storage struct {
+	typedParameters
+}
+
+// Auth defines the configuration for registry authorization and access
+// control.
+type Auth struct {
+	typedParameters
 }
 
 // Parameters defines a key-value parameters mapping
@@ -244,7 +263,7 @@ func parseV0_1Registry(in []byte) (*Configuration, error) {
 	if storageType, ok := envMap["REGISTRY_STORAGE"]; ok {
 		if storageType != config.Storage.Type() {
 			// Reset the storage parameters because we're using a different storage type
-			config.Storage = Storage{storageType: Parameters{}}
+			config.Storage = Storage{typedParameters: typedParameters{storageType: Parameters{}}}
 		}
 	}
 
