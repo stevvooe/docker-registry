@@ -24,6 +24,8 @@ type Configuration struct {
 	// Storage is the configuration for the registry's storage driver
 	Storage Storage `yaml:"storage"`
 
+	// Auth allows configuration of various authorization methods that may be
+	// used to gate requests.
 	Auth Auth `yaml:"auth"`
 
 	// HTTP contains configuration parameters for the registry's http
@@ -122,34 +124,99 @@ func (loglevel *Loglevel) UnmarshalYAML(unmarshal func(interface{}) error) error
 	return nil
 }
 
-// typedParemeters a type that exposes the key along with child values in a
-// yaml file.
-type typedParameters map[string]Parameters
+// Parameters defines a key-value parameters mapping
+type Parameters map[string]string
 
-// Type returns the parameters type, such as filesystem or s3, or basic or
-// bearer for auth.
-func (tp typedParameters) Type() string {
+// Storage defines the configuration for registry object storage
+type Storage map[string]Parameters
+
+// Type returns the storage driver type, such as filesystem or s3
+func (storage Storage) Type() string {
 	// Return only key in this map
-	for k := range tp {
+	for k := range storage {
 		return k
 	}
 	return ""
 }
 
-// Parameters returns the Parameters map for a parameterized configuration
-func (tp typedParameters) Parameters() Parameters {
-	return tp[tp.Type()]
+// Parameters returns the Parameters map for a Storage configuration
+func (storage Storage) Parameters() Parameters {
+	return storage[storage.Type()]
 }
 
-// setParameter changes the parameter at the provided key to the new value.
-func (tp typedParameters) setParameter(key, value string) {
-	tp[tp.Type()][key] = value
+// setParameter changes the parameter at the provided key to the new value
+func (storage Storage) setParameter(key, value string) {
+	storage[storage.Type()][key] = value
 }
 
-// UnmarshalYAML implements the yaml.Unmarshaler interface. Unmarshals a
-// single item map into a typedParemeter or a string into a type with no
-// parameters
-func (tp *typedParameters) UnmarshalYAML(unmarshal func(interface{}) error) error {
+func (storage *Storage) reset(typ string) {
+	*storage = Storage{typ: Parameters{}}
+}
+
+// UnmarshalYAML implements the yaml.Unmarshaler interface
+// Unmarshals a single item map into a Storage or a string into a Storage type with no parameters
+func (storage *Storage) UnmarshalYAML(unmarshal func(interface{}) error) error {
+	var storageMap map[string]Parameters
+	err := unmarshal(&storageMap)
+	if err == nil {
+		if len(storageMap) > 1 {
+			types := make([]string, 0, len(storageMap))
+			for k := range storageMap {
+				types = append(types, k)
+			}
+			return fmt.Errorf("Must provide exactly one storage type. Provided: %v", types)
+		}
+		*storage = storageMap
+		return nil
+	}
+
+	var storageType string
+	err = unmarshal(&storageType)
+	if err == nil {
+		*storage = Storage{storageType: Parameters{}}
+		return nil
+	}
+
+	return err
+}
+
+// MarshalYAML implements the yaml.Marshaler interface
+func (storage Storage) MarshalYAML() (interface{}, error) {
+	if storage.Parameters() == nil {
+		return storage.Type(), nil
+	}
+	return map[string]Parameters(storage), nil
+}
+
+// Auth defines the configuration for registry authorization.
+type Auth map[string]Parameters
+
+// Type returns the storage driver type, such as filesystem or s3
+func (auth Auth) Type() string {
+	// Return only key in this map
+	for k := range auth {
+		return k
+	}
+	return ""
+}
+
+// Parameters returns the Parameters map for an Auth configuration
+func (auth Auth) Parameters() Parameters {
+	return auth[auth.Type()]
+}
+
+// setParameter changes the parameter at the provided key to the new value
+func (auth Auth) setParameter(key, value string) {
+	auth[auth.Type()][key] = value
+}
+
+func (auth *Auth) reset(typ string) {
+	*auth = Auth{typ: Parameters{}}
+}
+
+// UnmarshalYAML implements the yaml.Unmarshaler interface
+// Unmarshals a single item map into a Storage or a string into a Storage type with no parameters
+func (auth *Auth) UnmarshalYAML(unmarshal func(interface{}) error) error {
 	var m map[string]Parameters
 	err := unmarshal(&m)
 	if err == nil {
@@ -162,15 +229,16 @@ func (tp *typedParameters) UnmarshalYAML(unmarshal func(interface{}) error) erro
 			// TODO(stevvooe): May want to change this slightly for
 			// authorization to allow multiple challenges.
 			return fmt.Errorf("must provide exactly one type. Provided: %v", types)
+
 		}
-		*tp = m
+		*auth = m
 		return nil
 	}
 
-	var typ string
-	err = unmarshal(&typ)
+	var authType string
+	err = unmarshal(&authType)
 	if err == nil {
-		*tp = typedParameters{typ: Parameters{}}
+		*auth = Auth{authType: Parameters{}}
 		return nil
 	}
 
@@ -178,26 +246,12 @@ func (tp *typedParameters) UnmarshalYAML(unmarshal func(interface{}) error) erro
 }
 
 // MarshalYAML implements the yaml.Marshaler interface
-func (tp typedParameters) MarshalYAML() (interface{}, error) {
-	if tp.Parameters() == nil {
-		return tp.Type(), nil
+func (auth Auth) MarshalYAML() (interface{}, error) {
+	if auth.Parameters() == nil {
+		return auth.Type(), nil
 	}
-	return map[string]Parameters(tp), nil
+	return map[string]Parameters(auth), nil
 }
-
-// Storage defines the configuration for registry object storage
-type Storage struct {
-	typedParameters
-}
-
-// Auth defines the configuration for registry authorization and access
-// control.
-type Auth struct {
-	typedParameters
-}
-
-// Parameters defines a key-value parameters mapping
-type Parameters map[string]string
 
 // Parse parses an input configuration yaml document into a Configuration struct
 // This should generally be capable of handling old configuration format versions
@@ -259,31 +313,55 @@ func parseV0_1Registry(in []byte) (*Configuration, error) {
 		config.Loglevel = newLoglevel
 	}
 
-	// Override config.Storage if environment variable is provided
-	if storageType, ok := envMap["REGISTRY_STORAGE"]; ok {
-		if storageType != config.Storage.Type() {
-			// Reset the storage parameters because we're using a different storage type
-			config.Storage = Storage{typedParameters: typedParameters{storageType: Parameters{}}}
-		}
-	}
-
-	if config.Storage.Type() == "" {
-		return nil, fmt.Errorf("Must provide exactly one storage type, optionally with parameters. Provided: %v", config.Storage)
-	}
-
-	// Override storage parameters with all environment variables of the format:
-	// REGISTRY_STORAGE_<storage driver type>_<parameter name>
-	storageParamsRegexp, err := regexp.Compile(fmt.Sprintf("^REGISTRY_STORAGE_%s_([A-Z0-9]+)$", strings.ToUpper(config.Storage.Type())))
-	if err != nil {
+	if err := envParameterSetter(envMap, "storage", "REGISTRY_STORAGE", &config.Storage, true); err != nil {
 		return nil, err
 	}
-	for k, v := range envMap {
-		if submatches := storageParamsRegexp.FindStringSubmatch(k); submatches != nil {
-			config.Storage.setParameter(strings.ToLower(submatches[1]), v)
-		}
+
+	if err := envParameterSetter(envMap, "auth", "REGISTRY_AUTH", &config.Auth, false); err != nil {
+		return nil, err
 	}
 
 	return (*Configuration)(&config), nil
+}
+
+// TODO(stevvooe): Come up with a better name for this. Basically, it allows
+// us to override config with environment variables on unknown extension
+// configs.
+
+type parameterSetter interface {
+	Type() string
+	setParameter(k, v string)
+	reset(typ string)
+}
+
+func envParameterSetter(envMap map[string]string, name, prefix string, config parameterSetter, required bool) error {
+	// Override config.Auth if environment variable is provided
+	if typ, ok := envMap[prefix]; ok {
+		if typ != config.Type() {
+			// Reset the parameters because we're using a different type
+			config.reset(typ)
+		}
+	}
+
+	if config.Type() == "" {
+		if !required {
+			return nil
+		}
+		return fmt.Errorf("must provide exactly one %s type, optionally with parameters. provided: %v", name, config)
+	}
+
+	// Override  parameters with all environment variables of the format:
+	// <prefix>_<auth type>_<parameter name>
+	paramsRegexp, err := regexp.Compile(fmt.Sprintf("^%s_%s_([A-Z0-9]+)$", strings.ToUpper(prefix), strings.ToUpper(config.Type())))
+	if err != nil {
+		return err
+	}
+	for k, v := range envMap {
+		if submatches := paramsRegexp.FindStringSubmatch(k); submatches != nil {
+			config.setParameter(strings.ToLower(submatches[1]), v)
+		}
+	}
+	return nil
 }
 
 // getEnvMap reads the current environment variables and converts these into a key/value map

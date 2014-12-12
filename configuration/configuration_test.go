@@ -17,18 +17,22 @@ var configStruct = Configuration{
 	Version:  "0.1",
 	Loglevel: "info",
 	Storage: Storage{
-		typedParameters{
-			"s3": Parameters{
-				"region":    "us-east-1",
-				"bucket":    "my-bucket",
-				"rootpath":  "/registry",
-				"encrypt":   "true",
-				"secure":    "false",
-				"accesskey": "SAMPLEACCESSKEY",
-				"secretkey": "SUPERSECRET",
-				"host":      "",
-				"port":      "",
-			},
+		"s3": Parameters{
+			"region":    "us-east-1",
+			"bucket":    "my-bucket",
+			"rootpath":  "/registry",
+			"encrypt":   "true",
+			"secure":    "false",
+			"accesskey": "SAMPLEACCESSKEY",
+			"secretkey": "SUPERSECRET",
+			"host":      "",
+			"port":      "",
+		},
+	},
+	Auth: Auth{
+		"silly": Parameters{
+			"realm":   "silly",
+			"service": "silly",
 		},
 	},
 }
@@ -60,6 +64,10 @@ var inmemoryConfigYamlV0_1 = `
 version: 0.1
 loglevel: info
 storage: inmemory
+auth:
+  silly:
+    realm: silly
+    service: silly
 `
 
 type ConfigSuite struct {
@@ -93,7 +101,7 @@ func (suite *ConfigSuite) TestParseSimple(c *C) {
 // TestParseInmemory validates that configuration yaml with storage provided as a string can be
 // parsed into a Configuration struct with no storage parameters
 func (suite *ConfigSuite) TestParseInmemory(c *C) {
-	suite.expectedConfig.Storage = Storage{typedParameters: typedParameters{"inmemory": Parameters{}}}
+	suite.expectedConfig.Storage = Storage{"inmemory": Parameters{}}
 
 	config, err := Parse(bytes.NewReader([]byte(inmemoryConfigYamlV0_1)))
 	c.Assert(err, IsNil)
@@ -131,8 +139,7 @@ func (suite *ConfigSuite) TestParseWithDifferentEnvStorageParams(c *C) {
 // TestParseWithDifferentEnvStorageType validates that providing an environment variable that
 // changes the storage type will be reflected in the parsed Configuration struct
 func (suite *ConfigSuite) TestParseWithDifferentEnvStorageType(c *C) {
-	suite.expectedConfig.Storage = Storage{typedParameters: typedParameters{"inmemory": Parameters{}}}
-
+	suite.expectedConfig.Storage = Storage{"inmemory": Parameters{}}
 	os.Setenv("REGISTRY_STORAGE", "inmemory")
 
 	config, err := Parse(bytes.NewReader([]byte(configYamlV0_1)))
@@ -144,8 +151,7 @@ func (suite *ConfigSuite) TestParseWithDifferentEnvStorageType(c *C) {
 // that changes the storage type will be reflected in the parsed Configuration struct and that
 // environment storage parameters will also be included
 func (suite *ConfigSuite) TestParseWithDifferentEnvStorageTypeAndParams(c *C) {
-	suite.expectedConfig.Storage = Storage{typedParameters: typedParameters{"filesystem": Parameters{}}}
-
+	suite.expectedConfig.Storage = Storage{"filesystem": Parameters{}}
 	suite.expectedConfig.Storage.setParameter("rootdirectory", "/tmp/testroot")
 
 	os.Setenv("REGISTRY_STORAGE", "filesystem")
@@ -193,9 +199,14 @@ func copyConfig(config Configuration) *Configuration {
 
 	configCopy.Version = MajorMinorVersion(config.Version.Major(), config.Version.Minor())
 	configCopy.Loglevel = config.Loglevel
-	configCopy.Storage = Storage{typedParameters{config.Storage.Type(): Parameters{}}}
+	configCopy.Storage = Storage{config.Storage.Type(): Parameters{}}
 	for k, v := range config.Storage.Parameters() {
 		configCopy.Storage.setParameter(k, v)
+	}
+
+	configCopy.Auth = Auth{config.Auth.Type(): Parameters{}}
+	for k, v := range config.Auth.Parameters() {
+		configCopy.Auth.setParameter(k, v)
 	}
 
 	return configCopy
